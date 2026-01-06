@@ -4,14 +4,24 @@
 #include <pthread.h>
 
 #define MAX_NAME_LEN 128
-#define MAX_VALUE_LEN 256
+#define MAX_VALUE_LEN 4096
 
 struct variable_struct {
     char name[MAX_NAME_LEN];
-    char value[MAX_VALUE_LEN];
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
+    char value[MAX_VALUE_LEN]; // Ime mora biti 'value', da se ujema s .c datotekami
+
+    // --- Reader-Writer Lock Fields ---
+    pthread_mutex_t m1;
+    pthread_mutex_t m2;
+    int readers_count;
+
+    // --- Wait/Notify Fields ---
+    pthread_mutex_t change_mutex;
+    pthread_cond_t change_cond;
+    pthread_cond_t destroy_cond;
     int changed;
+    int is_deleted;
+    int waiters_count;
 };
 
 void init_variable(struct variable_struct *var, const char *name);

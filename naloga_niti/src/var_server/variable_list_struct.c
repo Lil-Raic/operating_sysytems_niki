@@ -1,62 +1,123 @@
-#include "variable_list_struct.h"
+#include "variable_struct.h"
 #include <string.h>
+#include <stdio.h>
 
-void init_variables_list(struct variables_list_struct *list) {
-    list->count = 0;
-    pthread_mutex_init(&list->mutex, NULL);
+void init_variable(struct variable_struct *var, const char *name) {
+    strncpy(var->name, name, MAX_NAME_LEN);
+    memset(var->value, 0, MAX_VALUE_LEN);
+
+    // Initialize locks
+    pthread_mutex_init(&var->m1, NULL);
+    pthread_mutex_init(&var->m2, NULL);
+    var->readers_count = 0;
+
+    // Initialize wait/notify primitives
+    pthread_mutex_init(&var->change_mutex, NULL);
+    pthread_cond_init(&var->change_cond, NULL);
+    pthread_cond_init(&var->destroy_cond, NULL);
+    var->changed = 0;
+    var->is_deleted = 0;
+    var->waiters_count = 0;
 }
 
-void clear_variables_list(struct variables_list_struct *list) {
-    for (int i = 0; i < list->count; i++) {
-        clear_variable(&list->vars[i]);
+void clear_variable(struct variable_struct *var) {
+    // 1. Lock Writer Mutex (m2) - block new readers/writers
+    pthread_mutex_lock(&var->m2);
+
+    // 2. Notify all waiters that variable is dying
+    pthread_mutex_lock(&var->change_mutex);
+    var->is_deleted = 1;
+    pthread_cond_broadcast(&var->change_cond);
+    
+    // 3. Wait for waiters to leave
+    while (var->waiters_count > 0) {
+        pthread_cond_wait(&var->destroy_cond, &var->change_mutex);
     }
-    pthread_mutex_destroy(&list->mutex);
+    pthread_mutex_unlock(&var->change_mutex);
+
+    // 4. Clear memory
+    memset(var->name, 0, MAX_NAME_LEN);
+    memset(var->value, 0, MAX_VALUE_LEN);
+
+    // 5. Unlock and destroy
+    pthread_mutex_unlock(&var->m2);
+
+    pthread_mutex_destroy(&var->m1);
+    pthread_mutex_destroy(&var->m2);
+    pthread_mutex_destroy(&var->change_mutex);
+    pthread_cond_destroy(&var->change_cond);
+    pthread_cond_destroy(&var->destroy_cond);
 }
 
-struct variable_struct *
-find_named_variable(struct variables_list_struct *list, const char *name) {
-    pthread_mutex_lock(&list->mutex);
-
-    for (int i = 0; i < list->count; i++) {
-        if (strcmp(list->vars[i].name, name) == 0) {
-            pthread_mutex_unlock(&list->mutex);
-            return &list->vars[i];
-        }
+void read_variable_lock(
+    struct variable_struct *var,
+    void (*read_fn)(struct variable_struct *, void *),
+    void *args
+) {
+    // READER ENTRY
+    pthread_mutex_lock(&var->m1);
+    var->readers_count++;
+    if (var->readers_count == 1) {
+        pthread_mutex_lock(&var->m2); // First reader locks out writers
     }
+    pthread_mutex_unlock(&var->m1);
 
-    pthread_mutex_unlock(&list->mutex);
-    return NULL;
+    // READ
+    read_fn(var, args);
+
+    // READER EXIT
+    pthread_mutex_lock(&var->m1);
+    var->readers_count--;
+    if (var->readers_count == 0) {
+        pthread_mutex_unlock(&var->m2); // Last reader releases lock
+    }
+    pthread_mutex_unlock(&var->m1);
 }
 
-struct variable_struct *
-create_new_variable(struct variables_list_struct *list, const char *name) {
-    pthread_mutex_lock(&list->mutex);
+void write_variable_lock(
+    struct variable_struct *var,
+    void (*write_fn)(struct variable_struct *, void *),
+    void *args
+) {
+    // WRITER ENTRY
+    pthread_mutex_lock(&var->m2);
 
-    if (list->count >= MAX_VARIABLES) {
-        pthread_mutex_unlock(&list->mutex);
-        return NULL;
-    }
+    // WRITE
+    write_fn(var, args);
 
-    struct variable_struct *var = &list->vars[list->count++];
-    init_variable(var, name);
+    // NOTIFY WAITERS
+    pthread_mutex_lock(&var->change_mutex);
+    var->changed = 1;
+    pthread_cond_broadcast(&var->change_cond);
+    pthread_mutex_unlock(&var->change_mutex);
 
-    pthread_mutex_unlock(&list->mutex);
-    return var;
+    // WRITER EXIT
+    pthread_mutex_unlock(&var->m2);
 }
 
-int remove_named_variable(struct variables_list_struct *list, const char *name) {
-    pthread_mutex_lock(&list->mutex);
+int wait_variable_lock(struct variable_struct *var) {
+    pthread_mutex_lock(&var->change_mutex);
+    var->waiters_count++;
 
-    for (int i = 0; i < list->count; i++) {
-        if (strcmp(list->vars[i].name, name) == 0) {
-            clear_variable(&list->vars[i]);
-            list->vars[i] = list->vars[list->count - 1];
-            list->count--;
-            pthread_mutex_unlock(&list->mutex);
-            return 0;
-        }
+    // Wait until changed or deleted
+    while (!var->changed && !var->is_deleted) {
+        pthread_cond_wait(&var->change_cond, &var->change_mutex);
     }
 
-    pthread_mutex_unlock(&list->mutex);
-    return -1;
+    int ret_val = 0;
+    if (var->is_deleted) {
+        ret_val = 1; // UNSET
+    } else {
+        ret_val = 0; // SET
+        var->changed = 0; // Reset flag (simple implementation)
+    }
+
+    var->waiters_count--;
+    // If we are the last waiter and it's being deleted, tell clear_variable to proceed
+    if (var->waiters_count == 0 && var->is_deleted) {
+        pthread_cond_signal(&var->destroy_cond);
+    }
+
+    pthread_mutex_unlock(&var->change_mutex);
+    return ret_val;
 }
