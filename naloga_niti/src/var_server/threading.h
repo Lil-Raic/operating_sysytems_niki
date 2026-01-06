@@ -2,7 +2,7 @@
 #define THREADING_H
 
 struct threading_struct {
-    /* no state needed */
+    /* no global state needed */
 };
 
 void threading_setup(struct threading_struct *threading_obj);

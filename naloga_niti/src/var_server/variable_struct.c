@@ -1,101 +1,89 @@
-#include "variable_struct.h"
+#include "variable_list_struct.h"
 #include <string.h>
-#include <stdio.h>
 
-void init_variable(struct variable_struct *var, const char *name) {
+void init_variable(struct variable_struct *var, const char name[])
+{
     strncpy(var->name, name, MAX_NAME_LEN);
-    memset(var->value, 0, MAX_VALUE_LEN);
+    memset(var->data, 0, sizeof(var->data));
 
     pthread_mutex_init(&var->m1, NULL);
     pthread_mutex_init(&var->m2, NULL);
-    var->readers_count = 0;
+    pthread_cond_init(&var->changed, NULL);
 
-    pthread_mutex_init(&var->change_mutex, NULL);
-    pthread_cond_init(&var->change_cond, NULL);
-    pthread_cond_init(&var->destroy_cond, NULL);
-    var->changed = 0;
-    var->is_deleted = 0;
-    var->waiters_count = 0;
+    var->readers = 0;
+    var->deleted = 0;
+    var->waiting = 0;
 }
 
-void clear_variable(struct variable_struct *var) {
-    pthread_mutex_lock(&var->m2); // Lock Writer Mutex
+void clear_variable(struct variable_struct *var)
+{
+    pthread_mutex_lock(&var->m2);
 
-    pthread_mutex_lock(&var->change_mutex);
-    var->is_deleted = 1;
-    pthread_cond_broadcast(&var->change_cond);
-    while (var->waiters_count > 0) {
-        pthread_cond_wait(&var->destroy_cond, &var->change_mutex);
-    }
-    pthread_mutex_unlock(&var->change_mutex);
+    var->deleted = 1;
+    pthread_cond_broadcast(&var->changed);
 
-    memset(var->name, 0, MAX_NAME_LEN);
-    memset(var->value, 0, MAX_VALUE_LEN);
+    while (var->waiting > 0)
+        pthread_cond_wait(&var->changed, &var->m2);
 
     pthread_mutex_unlock(&var->m2);
 
     pthread_mutex_destroy(&var->m1);
     pthread_mutex_destroy(&var->m2);
-    pthread_mutex_destroy(&var->change_mutex);
-    pthread_cond_destroy(&var->change_cond);
-    pthread_cond_destroy(&var->destroy_cond);
+    pthread_cond_destroy(&var->changed);
+
+    memset(var->name, 0, MAX_NAME_LEN);
+    memset(var->data, 0, sizeof(var->data));
 }
 
-void read_variable_lock(
-    struct variable_struct *var,
-    void (*read_fn)(struct variable_struct *, void *),
-    void *args
-) {
+void read_variable_lock(struct variable_struct *var,
+                        void (*read_function)(struct variable_struct *, void *),
+                        void *args)
+{
     pthread_mutex_lock(&var->m1);
-    var->readers_count++;
-    if (var->readers_count == 1) {
+    var->readers++;
+    if (var->readers == 1)
         pthread_mutex_lock(&var->m2);
-    }
     pthread_mutex_unlock(&var->m1);
 
-    read_fn(var, args);
+    if (!var->deleted)
+        read_function(var, args);
 
     pthread_mutex_lock(&var->m1);
-    var->readers_count--;
-    if (var->readers_count == 0) {
+    var->readers--;
+    if (var->readers == 0)
         pthread_mutex_unlock(&var->m2);
-    }
     pthread_mutex_unlock(&var->m1);
 }
 
-void write_variable_lock(
-    struct variable_struct *var,
-    void (*write_fn)(struct variable_struct *, void *),
-    void *args
-) {
+void write_variable_lock(struct variable_struct *var,
+                         void (*write_function)(struct variable_struct *, void *),
+                         void *args)
+{
     pthread_mutex_lock(&var->m2);
 
-    write_fn(var, args);
-
-    pthread_mutex_lock(&var->change_mutex);
-    var->changed = 1;
-    pthread_cond_broadcast(&var->change_cond);
-    pthread_mutex_unlock(&var->change_mutex);
+    if (!var->deleted) {
+        write_function(var, args);
+        pthread_cond_broadcast(&var->changed);
+    }
 
     pthread_mutex_unlock(&var->m2);
 }
 
-int wait_variable_lock(struct variable_struct *var) {
-    pthread_mutex_lock(&var->change_mutex);
-    var->waiters_count++;
+int wait_variable_lock(struct variable_struct *var)
+{
+    pthread_mutex_lock(&var->m2);
 
-    while (!var->changed && !var->is_deleted) {
-        pthread_cond_wait(&var->change_cond, &var->change_mutex);
-    }
+    var->waiting++;
 
-    int ret_val = var->is_deleted ? 1 : 0;
-    if (!var->is_deleted) var->changed = 0;
+    if (!var->deleted)
+        pthread_cond_wait(&var->changed, &var->m2);
 
-    var->waiters_count--;
-    if (var->waiters_count == 0 && var->is_deleted) {
-        pthread_cond_signal(&var->destroy_cond);
-    }
+    var->waiting--;
 
-    pthread_mutex_unlock(&var->change_mutex);
-    return ret_val;
+    if (var->deleted && var->waiting == 0)
+        pthread_cond_signal(&var->changed);
+
+    pthread_mutex_unlock(&var->m2);
+
+    return var->deleted ? 1 : 0;
 }

@@ -1,44 +1,26 @@
-#ifndef VARIABLE_STRUCT_H
-#define VARIABLE_STRUCT_H
+#ifndef VARIABLE_STRUCT_H_
+#define VARIABLE_STRUCT_H_
 
-#include <pthread.h>
+#include "definitions.h"
 
-#define MAX_NAME_LEN 128
-#define MAX_VALUE_LEN 4096
-
-struct variable_struct {
+struct variable_struct{
     char name[MAX_NAME_LEN];
-    char value[MAX_VALUE_LEN]; // Ime mora biti 'value', da se ujema s .c datotekami
-
-    // --- Reader-Writer Lock Fields ---
-    pthread_mutex_t m1;
-    pthread_mutex_t m2;
-    int readers_count;
-
-    // --- Wait/Notify Fields ---
-    pthread_mutex_t change_mutex;
-    pthread_cond_t change_cond;
-    pthread_cond_t destroy_cond;
-    int changed;
-    int is_deleted;
-    int waiters_count;
+    char data[4096];
+    // tukaj dodajte dodatne spremenljivke, ki jih bi potrebovali
+    // ključavnice, pogojne spremenljivke, semaforje, ...
 };
 
-void init_variable(struct variable_struct *var, const char *name);
-void clear_variable(struct variable_struct *var);
+// v tej funkciji inicializirate vsebino variable_struct (spremenljivke)
+void init_variable(struct variable_struct* var, const char name[]);
 
-void read_variable_lock(
-    struct variable_struct *var,
-    void (*read_fn)(struct variable_struct *, void *),
-    void *args
-);
+// v tej funkciji sprostite dinamične strukture, ki ste jih alocirali
+void clear_variable(struct variable_struct* var);
 
-void write_variable_lock(
-    struct variable_struct *var,
-    void (*write_fn)(struct variable_struct *, void *),
-    void *args
-);
-
-int wait_variable_lock(struct variable_struct *var);
+// v tej funkciji zaklenete spremenljivko za branje
+void read_variable_lock(struct variable_struct* var, void (*read_function)(struct variable_struct*, void*), void* args);
+// v tej funkciji zaklenete spremenljivko za pisanje
+void write_variable_lock(struct variable_struct* var, void (*write_function)(struct variable_struct*, void*), void* args);
+// v tej funkciji počakate, da druga nit opozori na spremembo spremenljivke
+int wait_variable_lock(struct variable_struct* var);
 
 #endif
